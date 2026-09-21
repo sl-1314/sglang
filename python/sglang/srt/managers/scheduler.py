@@ -349,6 +349,17 @@ class Scheduler(
         dp_rank: Optional[int],
     ):
         self.is_initializing = True
+        # [VERIFY sglang path] temporary log — confirm worker is importing the
+        # local sglang source overlay (PYTHONPATH=third_party/sglang/python)
+        # rather than the wheel preinstalled in the image. Remove after verify.
+        try:
+            import sglang as _sglang_verify
+            logger.info(
+                "[VERIFY sglang path] scheduler=%s tp_rank=%s path=%s",
+                id(self), tp_rank, _sglang_verify.__file__,
+            )
+        except Exception as e:
+            logger.info("[VERIFY sglang path] import failed: %s", e)
         self.init_soft_watchdog(server_args)
 
         # Parse args
