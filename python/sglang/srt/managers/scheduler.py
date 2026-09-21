@@ -1549,6 +1549,29 @@ class Scheduler(
             if self._engine_paused:
                 continue
 
+            # [VERIFY sched_state] temporary per-iteration snapshot — remove
+            # after verification. Shows running/waiting sizes and the group_id
+            # distribution across both queues, so affinity decisions can be
+            # cross-checked against actual cluster state.
+            running_gids = {}
+            for r in self.running_batch.reqs:
+                gid = r.group_id
+                if gid is not None:
+                    running_gids[gid] = running_gids.get(gid, 0) + 1
+            waiting_gids = {}
+            for r in self.waiting_queue:
+                gid = r.group_id
+                if gid is not None:
+                    waiting_gids[gid] = waiting_gids.get(gid, 0) + 1
+            print(
+                f"[VERIFY sched_state] scheduler={id(self)} "
+                f"running={len(self.running_batch.reqs)} "
+                f"waiting={len(self.waiting_queue)} "
+                f"running_groups={running_gids} "
+                f"waiting_groups={waiting_gids}",
+                flush=True,
+            )
+
             # Get the next batch to run
             batch = self.get_next_batch_to_run()
             self.cur_batch = batch
@@ -1584,6 +1607,28 @@ class Scheduler(
             self.process_input_requests(recv_reqs)
             if self._engine_paused:
                 continue
+
+            # [VERIFY sched_state] temporary per-iteration snapshot — remove
+            # after verification. Same as event_loop_normal; keep both in
+            # sync until the logs are removed.
+            running_gids = {}
+            for r in self.running_batch.reqs:
+                gid = r.group_id
+                if gid is not None:
+                    running_gids[gid] = running_gids.get(gid, 0) + 1
+            waiting_gids = {}
+            for r in self.waiting_queue:
+                gid = r.group_id
+                if gid is not None:
+                    waiting_gids[gid] = waiting_gids.get(gid, 0) + 1
+            print(
+                f"[VERIFY sched_state] scheduler={id(self)} "
+                f"running={len(self.running_batch.reqs)} "
+                f"waiting={len(self.waiting_queue)} "
+                f"running_groups={running_gids} "
+                f"waiting_groups={waiting_gids}",
+                flush=True,
+            )
 
             # Get the next batch to run
             batch = self.get_next_batch_to_run()
@@ -2707,6 +2752,8 @@ class Scheduler(
         # this call). Fall back to FIFO when no affinity match. Tie-breaker
         # within an affinity match is FIFO (earliest in waiting_queue first).
         considered: set = set()  # id(req) already attempted in this call
+        admit_affinity_hits = 0
+        admit_fallback_hits = 0
         while len(considered) < len(self.waiting_queue):
             # Dynamic running_groups: running_batch + reqs admitted in this call
             running_groups: set = {
@@ -2717,6 +2764,16 @@ class Scheduler(
             for r in adder.can_run_list:
                 if r.group_id is not None:
                     running_groups.add(r.group_id)
+
+            # [VERIFY admit_iter] temporary per-iteration log.
+            print(
+                f"[VERIFY admit_iter] scheduler={id(self)} "
+                f"considered={len(considered)} "
+                f"waiting={len(self.waiting_queue)} "
+                f"can_run={len(adder.can_run_list)} "
+                f"running_groups={running_groups}",
+                flush=True,
+            )
 
             # Find next req: prefer affinity match (FIFO within), else FIFO fallback.
             next_req = None
@@ -2743,10 +2800,20 @@ class Scheduler(
             req = next_req
 
             if affinity_hit:
+                admit_affinity_hits += 1
                 # [VERIFY admit_affinity] temporary — remove after confirming
                 # Q9 affinity fires and clusters admits within a group.
                 print(
                     f"[VERIFY admit_affinity] scheduler={id(self)} "
+                    f"rid={req.rid} group_id={req.group_id} "
+                    f"running_groups={running_groups}",
+                    flush=True,
+                )
+            else:
+                admit_fallback_hits += 1
+                # [VERIFY admit_fallback] temporary — remove after verification.
+                print(
+                    f"[VERIFY admit_fallback] scheduler={id(self)} "
                     f"rid={req.rid} group_id={req.group_id} "
                     f"running_groups={running_groups}",
                     flush=True,
@@ -2816,6 +2883,14 @@ class Scheduler(
                     req.mamba_pool_idx = None
                 break
 
+        # [VERIFY admit_exit] temporary per-call summary — remove after verification.
+        print(
+            f"[VERIFY admit_exit] scheduler={id(self)} "
+            f"admitted={len(adder.can_run_list)} "
+            f"affinity_hits={admit_affinity_hits} "
+            f"fallback_hits={admit_fallback_hits}",
+            flush=True,
+        )
 
         # Update waiting queue
         can_run_list: List[Req] = adder.can_run_list

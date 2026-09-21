@@ -2179,7 +2179,18 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         bypasses affinity — back-only retract is incompatible with picking a
         specific req by group.
         """
+        # [VERIFY retract] temporary entry log — remove after verification.
+        print(
+            f"[VERIFY retract_entry] scheduler={id(self)} "
+            f"batch_size={len(self.reqs)} "
+            f"retracted_group_ids={retracted_group_ids or set()} "
+            f"spec_algo={bool(server_args.speculative_algorithm)}",
+            flush=True,
+        )
+
         sorted_indices = list(range(len(self.reqs)))
+        affinity_hits = 0
+        fallback_hits = 0
 
         # TODO(lsyin): improve retraction policy for radix cache
         # For spec decoding, filter_batch API can only filter
@@ -2227,6 +2238,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
             if idx_to_pop_pos is not None:
                 idx = sorted_indices.pop(idx_to_pop_pos)
+                affinity_hits += 1
                 # [VERIFY retract_affinity] temporary — remove after confirming
                 # Q8 affinity fires and concentrates retracts within a group.
                 print(
@@ -2239,6 +2251,15 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             else:
                 # Fall through to length_key (or original order for spec decoding).
                 idx = sorted_indices.pop()
+                fallback_hits += 1
+                fallback_req = self.reqs[idx]
+                print(
+                    f"[VERIFY retract_fallback] scheduler={id(self)} "
+                    f"rid={fallback_req.rid} "
+                    f"group_id={fallback_req.group_id} "
+                    f"retracted_groups={current_retracted_groups}",
+                    flush=True,
+                )
 
             req = self.reqs[idx]
             retracted_reqs.append(req)
@@ -2277,6 +2298,14 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             total_max_new_tokens + 1
         )  # avoid zero division
         new_estimate_ratio = min(1.0, new_estimate_ratio)
+
+        # [VERIFY retract] temporary exit log — remove after verification.
+        print(
+            f"[VERIFY retract_exit] scheduler={id(self)} "
+            f"retracted={len(retracted_reqs)} aborted={len(reqs_to_abort)} "
+            f"affinity_hits={affinity_hits} fallback_hits={fallback_hits}",
+            flush=True,
+        )
 
         return retracted_reqs, new_estimate_ratio, reqs_to_abort
 
