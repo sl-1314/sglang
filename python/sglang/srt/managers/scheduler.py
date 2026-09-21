@@ -358,8 +358,14 @@ class Scheduler(
                 "[VERIFY sglang path] scheduler=%s tp_rank=%s path=%s",
                 id(self), tp_rank, _sglang_verify.__file__,
             )
+            print(
+                f"[VERIFY sglang path] scheduler={id(self)} tp_rank={tp_rank} "
+                f"path={_sglang_verify.__file__}",
+                flush=True,
+            )
         except Exception as e:
             logger.info("[VERIFY sglang path] import failed: %s", e)
+            print(f"[VERIFY sglang path] import failed: {e}", flush=True)
         self.init_soft_watchdog(server_args)
 
         # Parse args
