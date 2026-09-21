@@ -619,6 +619,7 @@ class Req(ReqDllmMixin):
         ] = None,
         return_pooled_hidden_states: bool = False,
         multi_item_delimiter_indices: Optional[List[int]] = None,
+        group_id: Optional[str] = None,
     ):
         # Input and output info
         self.rid = rid
@@ -637,6 +638,11 @@ class Req(ReqDllmMixin):
         self.input_embeds = input_embeds
         self.positional_embed_overrides = positional_embed_overrides
         self.multi_item_delimiter_indices = multi_item_delimiter_indices
+        # group_id: stable identity shared by all sibling requests in the same
+        # rollout.n group (verl partial_reprefill). Used by the scheduler's
+        # group-affinity retract/admission policy. Stable across multi-segment
+        # resume (Req object is not recreated on resume).
+        self.group_id = group_id
 
         # For req-level memory management
         self.kv_committed_len = 0

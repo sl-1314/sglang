@@ -2022,8 +2022,19 @@ class Scheduler(
                 dllm_config=self.dllm_config,
                 time_stats=recv_req.time_stats,
                 multi_item_delimiter_indices=recv_req.multi_item_delimiter_indices,
+                group_id=recv_req.group_id,
             )
             req.tokenizer = self.tokenizer
+            # [VERIFY group_id] temporary log — remove after confirming group_id
+            # reaches Req and siblings route to the same engine replica.
+            # id(self) distinguishes scheduler instances across engine replicas
+            # (each replica is a separate process with its own Scheduler object).
+            logger.info(
+                "[VERIFY group_id] scheduler=%s rid=%s group_id=%s",
+                id(self),
+                req.rid,
+                req.group_id,
+            )
 
             if self.disaggregation_mode != DisaggregationMode.NULL:
                 # Invalid request for disaggregated mode

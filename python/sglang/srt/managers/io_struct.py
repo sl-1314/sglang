@@ -51,6 +51,10 @@ else:
 class BaseReq(ABC):
     rid: Optional[Union[str, List[str]]] = field(default=None, kw_only=True)
     http_worker_ipc: Optional[str] = field(default=None, kw_only=True)
+    # Stable identity shared by all sibling requests in the same rollout.n
+    # group (verl partial_reprefill). Propagated to the scheduler's Req object
+    # for group-affinity scheduling. Stable across multi-segment resume.
+    group_id: Optional[str] = field(default=None, kw_only=True)
 
     def regenerate_rid(self):
         """Generate a new request ID and return it."""
