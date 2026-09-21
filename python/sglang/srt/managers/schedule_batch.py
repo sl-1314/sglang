@@ -2166,9 +2166,19 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         return retracted_reqs
 
     def retract_decode(
-        self, server_args: ServerArgs
+        self,
+        server_args: ServerArgs,
+        retracted_group_ids: Optional[set] = None,
     ) -> Tuple[List[Req], float, List[Req]]:
-        """Retract the decoding requests when there is not enough memory."""
+        """Retract the decoding requests when there is not enough memory.
+
+        Q8 group affinity: when ``retracted_group_ids`` is non-empty (some
+        groups already have siblings retracted into the waiting_queue), prefer
+        retracting reqs whose ``group_id`` is in that set. Tie-breaker is the
+        default ``length_key`` order (shortest output first). Spec decoding
+        bypasses affinity — back-only retract is incompatible with picking a
+        specific req by group.
+        """
         sorted_indices = list(range(len(self.reqs)))
 
         # TODO(lsyin): improve retraction policy for radix cache
@@ -2195,7 +2205,41 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                 break
 
             first_iter = False
-            idx = sorted_indices.pop()
+
+            # Q8: dynamically compute the set of groups that already have a
+            # retracted sibling — passed-in waiting_queue state + this call's
+            # own progress. Empty for the first retract in a burst.
+            current_retracted_groups: set = set(retracted_group_ids) if retracted_group_ids else set()
+            for r in retracted_reqs:
+                if r.group_id is not None:
+                    current_retracted_groups.add(r.group_id)
+
+            # Q8: if any group has a retracted sibling, prefer retracting from
+            # that group. Scan sorted_indices from the back (shortest output
+            # first = length_key tie-breaker) for an affinity match.
+            idx_to_pop_pos: Optional[int] = None
+            if current_retracted_groups and not server_args.speculative_algorithm:
+                for pos in range(len(sorted_indices) - 1, -1, -1):
+                    candidate_gid = self.reqs[sorted_indices[pos]].group_id
+                    if candidate_gid is not None and candidate_gid in current_retracted_groups:
+                        idx_to_pop_pos = pos
+                        break
+
+            if idx_to_pop_pos is not None:
+                idx = sorted_indices.pop(idx_to_pop_pos)
+                # [VERIFY retract_affinity] temporary — remove after confirming
+                # Q8 affinity fires and concentrates retracts within a group.
+                print(
+                    f"[VERIFY retract_affinity] scheduler={id(self)} "
+                    f"rid={self.reqs[idx].rid} "
+                    f"group_id={self.reqs[idx].group_id} "
+                    f"retracted_groups={current_retracted_groups}",
+                    flush=True,
+                )
+            else:
+                # Fall through to length_key (or original order for spec decoding).
+                idx = sorted_indices.pop()
+
             req = self.reqs[idx]
             retracted_reqs.append(req)
             # release memory and don't insert into the tree because we need the space instantly

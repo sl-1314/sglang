@@ -2701,8 +2701,57 @@ class Scheduler(
                     self.running_batch.reqs,
                 )
 
-        # Get requests from the waiting queue to a new prefill batch
-        for req in self.waiting_queue:
+        # Get requests from the waiting queue to a new prefill batch.
+        # Q9 group affinity: dynamically prefer reqs whose group_id matches
+        # a sibling already in flight (running_batch.reqs + can_run_list from
+        # this call). Fall back to FIFO when no affinity match. Tie-breaker
+        # within an affinity match is FIFO (earliest in waiting_queue first).
+        considered: set = set()  # id(req) already attempted in this call
+        while len(considered) < len(self.waiting_queue):
+            # Dynamic running_groups: running_batch + reqs admitted in this call
+            running_groups: set = {
+                r.group_id
+                for r in self.running_batch.reqs
+                if r.group_id is not None
+            }
+            for r in adder.can_run_list:
+                if r.group_id is not None:
+                    running_groups.add(r.group_id)
+
+            # Find next req: prefer affinity match (FIFO within), else FIFO fallback.
+            next_req = None
+            affinity_hit = False
+            for req in self.waiting_queue:
+                if id(req) in considered:
+                    continue
+                if (
+                    req.group_id is not None
+                    and req.group_id in running_groups
+                ):
+                    next_req = req
+                    affinity_hit = True
+                    break
+            if next_req is None:
+                for req in self.waiting_queue:
+                    if id(req) not in considered:
+                        next_req = req
+                        break
+            if next_req is None:
+                break  # safety — should not happen given the while condition
+
+            considered.add(id(next_req))
+            req = next_req
+
+            if affinity_hit:
+                # [VERIFY admit_affinity] temporary — remove after confirming
+                # Q9 affinity fires and clusters admits within a group.
+                print(
+                    f"[VERIFY admit_affinity] scheduler={id(self)} "
+                    f"rid={req.rid} group_id={req.group_id} "
+                    f"running_groups={running_groups}",
+                    flush=True,
+                )
+
             if self.enable_lora and not self._can_schedule_lora_req(req, running_loras):
                 continue
 
@@ -2766,6 +2815,7 @@ class Scheduler(
                     )
                     req.mamba_pool_idx = None
                 break
+
 
         # Update waiting queue
         can_run_list: List[Req] = adder.can_run_list
@@ -2905,7 +2955,10 @@ class Scheduler(
                 mamba_pool.available_size() if mamba_pool is not None else None
             )
             retracted_reqs, new_token_ratio, reqs_to_abort = batch.retract_decode(
-                self.server_args
+                self.server_args,
+                retracted_group_ids={
+                    r.group_id for r in self.waiting_queue if r.group_id is not None
+                },
             )
             new_available_tokens = self.token_to_kv_pool_allocator.available_size()
             new_token_gained = new_available_tokens - old_available_tokens
