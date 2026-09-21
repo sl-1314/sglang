@@ -2046,17 +2046,20 @@ class Scheduler(
             # reaches Req and siblings route to the same engine replica.
             # id(self) distinguishes scheduler instances across engine replicas
             # (each replica is a separate process with its own Scheduler object).
-            logger.info(
-                "[VERIFY group_id] scheduler=%s rid=%s group_id=%s",
-                id(self),
-                req.rid,
-                req.group_id,
-            )
-            print(
-                f"[VERIFY group_id] scheduler={id(self)} rid={req.rid} "
-                f"group_id={req.group_id}",
-                flush=True,
-            )
+            #
+            # Commented out after verification — group_id transmission confirmed
+            # working end-to-end (commit eacc15f67). Uncomment to re-enable.
+            # logger.info(
+            #     "[VERIFY group_id] scheduler=%s rid=%s group_id=%s",
+            #     id(self),
+            #     req.rid,
+            #     req.group_id,
+            # )
+            # print(
+            #     f"[VERIFY group_id] scheduler={id(self)} rid={req.rid} "
+            #     f"group_id={req.group_id}",
+            #     flush=True,
+            # )
 
             if self.disaggregation_mode != DisaggregationMode.NULL:
                 # Invalid request for disaggregated mode
