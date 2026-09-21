@@ -1549,29 +1549,6 @@ class Scheduler(
             if self._engine_paused:
                 continue
 
-            # [VERIFY sched_state] temporary per-iteration snapshot — remove
-            # after verification. Shows running/waiting sizes and the group_id
-            # distribution across both queues, so affinity decisions can be
-            # cross-checked against actual cluster state.
-            running_gids = {}
-            for r in self.running_batch.reqs:
-                gid = r.group_id
-                if gid is not None:
-                    running_gids[gid] = running_gids.get(gid, 0) + 1
-            waiting_gids = {}
-            for r in self.waiting_queue:
-                gid = r.group_id
-                if gid is not None:
-                    waiting_gids[gid] = waiting_gids.get(gid, 0) + 1
-            print(
-                f"[VERIFY sched_state] scheduler={id(self)} "
-                f"running={len(self.running_batch.reqs)} "
-                f"waiting={len(self.waiting_queue)} "
-                f"running_groups={running_gids} "
-                f"waiting_groups={waiting_gids}",
-                flush=True,
-            )
-
             # Get the next batch to run
             batch = self.get_next_batch_to_run()
             self.cur_batch = batch
@@ -1607,28 +1584,6 @@ class Scheduler(
             self.process_input_requests(recv_reqs)
             if self._engine_paused:
                 continue
-
-            # [VERIFY sched_state] temporary per-iteration snapshot — remove
-            # after verification. Same as event_loop_normal; keep both in
-            # sync until the logs are removed.
-            running_gids = {}
-            for r in self.running_batch.reqs:
-                gid = r.group_id
-                if gid is not None:
-                    running_gids[gid] = running_gids.get(gid, 0) + 1
-            waiting_gids = {}
-            for r in self.waiting_queue:
-                gid = r.group_id
-                if gid is not None:
-                    waiting_gids[gid] = waiting_gids.get(gid, 0) + 1
-            print(
-                f"[VERIFY sched_state] scheduler={id(self)} "
-                f"running={len(self.running_batch.reqs)} "
-                f"waiting={len(self.waiting_queue)} "
-                f"running_groups={running_gids} "
-                f"waiting_groups={waiting_gids}",
-                flush=True,
-            )
 
             # Get the next batch to run
             batch = self.get_next_batch_to_run()
@@ -2764,16 +2719,6 @@ class Scheduler(
             for r in adder.can_run_list:
                 if r.group_id is not None:
                     running_groups.add(r.group_id)
-
-            # [VERIFY admit_iter] temporary per-iteration log.
-            print(
-                f"[VERIFY admit_iter] scheduler={id(self)} "
-                f"considered={len(considered)} "
-                f"waiting={len(self.waiting_queue)} "
-                f"can_run={len(adder.can_run_list)} "
-                f"running_groups={running_groups}",
-                flush=True,
-            )
 
             # Find next req: prefer affinity match (FIFO within), else FIFO fallback.
             next_req = None
