@@ -2052,6 +2052,11 @@ class Scheduler(
                 req.rid,
                 req.group_id,
             )
+            print(
+                f"[VERIFY group_id] scheduler={id(self)} rid={req.rid} "
+                f"group_id={req.group_id}",
+                flush=True,
+            )
 
             if self.disaggregation_mode != DisaggregationMode.NULL:
                 # Invalid request for disaggregated mode
