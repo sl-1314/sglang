@@ -1498,6 +1498,26 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                 self.metrics_collector.labels
             )
 
+    def _abort_all_except_reprefill(self):
+        """Q15: abort all in-flight requests whose rid does not contain
+        'reprefill'. Reprefill requests (pre-dispatched by P2 pipelining)
+        are preserved so their prefill progress is not wasted.
+
+        Sends one AbortReq per non-reprefill rid (abort_all=False, rid set).
+        Scheduler's abort_request matches by rid prefix, so this is per-request
+        precise abort. Reprefill requests stay in scheduler and continue
+        running — they will complete and return results to the trainer's
+        pending future.
+        """
+        rids_to_abort = [rid for rid in self.rid_to_state if "reprefill" not in rid]
+        for rid in rids_to_abort:
+            req = AbortReq(rid=rid, abort_all=False)
+            self.send_to_scheduler.send_pyobj(req)
+            if self.enable_metrics:
+                self.metrics_collector.observe_one_aborted_request(
+                    self.metrics_collector.labels
+                )
+
     async def pause_generation(self, obj: PauseGenerationReqInput):
         async with self.is_pause_cond:
             self.is_pause = True
@@ -1506,9 +1526,11 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                 # but let reprefill requests through the cond gate (see
                 # the wait_for in generate_request). Don't wait for
                 # model_update_lock — reprefill needs to acquire it as
-                # reader_lock to run.
+                # reader_lock to run. Pre-dispatched reprefill already
+                # in the scheduler is preserved (not aborted) by
+                # _abort_all_except_reprefill.
                 self.pause_except_prefill = True
-                self.abort_request(abort_all=True)
+                self._abort_all_except_reprefill()
             elif obj.mode != "abort":
                 await self.send_to_scheduler.send_pyobj(obj)
             else:
@@ -1529,17 +1551,21 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
             self.is_pause_cond.notify_all()
 
     def _is_reprefill_request(self, obj) -> bool:
-        """Q15: True if obj is a reprefill request (rid starts with 'reprefill_').
+        """Q15: True if obj is a reprefill request.
 
         These requests bypass the filtered pause cond gate so case 2 reprefill
         can run during on_sampled while surplus generation is blocked.
+
+        Matches rids containing 'reprefill' — covers both 'reprefill_...' and
+        'partial_reprefill_...' (the actual prefix used by verl's
+        _reprefill_all and _on_new_finished dispatch paths).
         """
         rid = getattr(obj, "rid", None)
         if rid is None:
             return False
         if isinstance(rid, list):
-            return any(r and r.startswith("reprefill_") for r in rid)
-        return bool(rid.startswith("reprefill_"))
+            return any(r and "reprefill" in r for r in rid)
+        return bool("reprefill" in rid)
 
     async def update_weights_from_disk(
         self,
