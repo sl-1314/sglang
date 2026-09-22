@@ -416,6 +416,12 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
         )
         self.is_pause = False
         self.is_pause_cond = asyncio.Condition()
+        # Q15 filtered pause: when True, reprefill requests (rid starts
+        # with "reprefill_") bypass the is_pause cond gate so case 2
+        # reprefill can run during on_sampled while surplus generation
+        # is blocked. Set by pause_generation(mode="abort_except_prefill"),
+        # cleared by continue_generation.
+        self.pause_except_prefill = False
 
     def init_lora(self):
         # LoRA
@@ -541,7 +547,13 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
         self.request_logger.log_received_request(obj, self.tokenizer, request)
 
         async with self.is_pause_cond:
-            await self.is_pause_cond.wait_for(lambda: not self.is_pause)
+            # Q15 filtered pause: let reprefill requests through while
+            # blocking surplus generation. pause_except_prefill is set
+            # by pause_generation(mode="abort_except_prefill").
+            await self.is_pause_cond.wait_for(
+                lambda: not self.is_pause
+                or (self.pause_except_prefill and self._is_reprefill_request(obj))
+            )
 
         async with self.model_update_lock.reader_lock:
             await self._validate_and_resolve_lora(obj)
@@ -1489,7 +1501,15 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
     async def pause_generation(self, obj: PauseGenerationReqInput):
         async with self.is_pause_cond:
             self.is_pause = True
-            if obj.mode != "abort":
+            if obj.mode == "abort_except_prefill":
+                # Q15 filtered pause: abort in-flight surplus generation,
+                # but let reprefill requests through the cond gate (see
+                # the wait_for in generate_request). Don't wait for
+                # model_update_lock — reprefill needs to acquire it as
+                # reader_lock to run.
+                self.pause_except_prefill = True
+                self.abort_request(abort_all=True)
+            elif obj.mode != "abort":
                 await self.send_to_scheduler.send_pyobj(obj)
             else:
                 # we are using the model_update_lock to check if there is still on-going requests.
@@ -1504,8 +1524,22 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
     async def continue_generation(self, obj: ContinueGenerationReqInput):
         async with self.is_pause_cond:
             self.is_pause = False
+            self.pause_except_prefill = False
             await self.send_to_scheduler.send_pyobj(obj)
             self.is_pause_cond.notify_all()
+
+    def _is_reprefill_request(self, obj) -> bool:
+        """Q15: True if obj is a reprefill request (rid starts with 'reprefill_').
+
+        These requests bypass the filtered pause cond gate so case 2 reprefill
+        can run during on_sampled while surplus generation is blocked.
+        """
+        rid = getattr(obj, "rid", None)
+        if rid is None:
+            return False
+        if isinstance(rid, list):
+            return any(r and r.startswith("reprefill_") for r in rid)
+        return bool(rid.startswith("reprefill_"))
 
     async def update_weights_from_disk(
         self,

@@ -1368,12 +1368,19 @@ class PauseGenerationReqInput(BaseReq):
             requests will be retracted back to the waiting_queue.
             Note: The KV cache can be flushed in this mode and will be automatically
             recomputed after continue_generation.
+
+    abort_except_prefill: Q15 filtered pause — abort all in-flight requests
+            (same as 'abort'), but let reprefill requests (rid starts with
+            'reprefill_') through the is_pause cond gate. Used by verl
+            partial_reprefill trainer to stop surplus generation while
+            case 2 reprefill runs during on_sampled. Caller must call
+            continue_generation to clear the filtered state.
     """
 
-    mode: Literal["abort", "retract", "in_place"] = "abort"
+    mode: Literal["abort", "retract", "in_place", "abort_except_prefill"] = "abort"
 
     def __post_init__(self):
-        allowed = ["abort", "retract", "in_place"]
+        allowed = ["abort", "retract", "in_place", "abort_except_prefill"]
         if self.mode not in allowed:
             raise ValueError(
                 f"Invalid mode: {self.mode!r}. " f"Expected one of {allowed}."
