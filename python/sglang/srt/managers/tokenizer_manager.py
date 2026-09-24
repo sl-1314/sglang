@@ -1509,7 +1509,16 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
         running — they will complete and return results to the trainer's
         pending future.
         """
-        rids_to_abort = [rid for rid in self.rid_to_state if "reprefill" not in rid]
+        all_rids = list(self.rid_to_state.keys())
+        rids_to_abort = [rid for rid in all_rids if "reprefill" not in rid]
+        reprefill_rids = [rid for rid in all_rids if "reprefill" in rid]
+        print(
+            f"[VERIFY filtered_pause] total={len(all_rids)} "
+            f"reprefill_preserved={len(reprefill_rids)} "
+            f"aborting={len(rids_to_abort)} "
+            f"reprefill_rids={reprefill_rids[:5]}",
+            flush=True,
+        )
         for rid in rids_to_abort:
             req = AbortReq(rid=rid, abort_all=False)
             self.send_to_scheduler.send_pyobj(req)

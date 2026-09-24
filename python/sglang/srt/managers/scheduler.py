@@ -3611,6 +3611,14 @@ class Scheduler(
         for i, req in enumerate(self.waiting_queue):
             if recv_req.abort_all or req.rid.startswith(recv_req.rid):
                 to_del.append(i)
+                if "reprefill" in req.rid:
+                    print(
+                        f"[VERIFY abort_hit_reprefill_waitq] req.rid={req.rid} "
+                        f"recv_req.rid={recv_req.rid} "
+                        f"abort_all={recv_req.abort_all} "
+                        f"prefix_match={req.rid.startswith(recv_req.rid)}",
+                        flush=True,
+                    )
 
         # Sort in reverse order to avoid index issues when deleting
         for i in reversed(to_del):
@@ -3702,6 +3710,13 @@ class Scheduler(
                 # The request will still run one decode forward pass.
                 # Then we reuse all existing code to clean up the KV cache allocation.
                 logger.debug(f"Abort running request. {req.rid=}")
+                if "reprefill" in req.rid and not recv_req.abort_all:
+                    print(
+                        f"[VERIFY abort_hit_reprefill] req.rid={req.rid} "
+                        f"recv_req.rid={recv_req.rid} "
+                        f"prefix_match={req.rid.startswith(recv_req.rid)}",
+                        flush=True,
+                    )
                 req.to_finish = FINISH_ABORT()
 
     def _pause_engine(self) -> Tuple[List[Req], int]:
