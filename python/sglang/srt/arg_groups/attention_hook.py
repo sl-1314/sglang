@@ -23,6 +23,7 @@ from sglang.srt.arg_groups.overrides import (
     _deterministic_aiter_prefill_page_size,
     _deterministic_allreduce_fusion_disable,
     _deterministic_attention_backend,
+    _deterministic_dsv4_constraints,
     _deterministic_rocm_rccl_check,
     _deterministic_sampling_backend,
     _fa4_page_constraint,
@@ -652,6 +653,9 @@ def handle_deterministic_inference(server_args: Any):
 
         # Check attention backend
         run_post_process_pass(server_args, _deterministic_attention_backend)
+        # DeepSeek-V4 entry constraints (run after the backend allowlist check,
+        # so a rejected backend name is reported first).
+        run_post_process_pass(server_args, _deterministic_dsv4_constraints)
 
         attention_backend = resolved_view(server_args).attention_backend
         if is_deepseek_model:

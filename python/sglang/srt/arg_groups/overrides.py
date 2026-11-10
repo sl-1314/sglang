@@ -1186,6 +1186,62 @@ def _deterministic_rocm_rccl_check(view: Any) -> dict:
 
 
 @register_post_process
+def _deterministic_dsv4_constraints(view: Any) -> dict:
+    """Reject non-batch-invariant DeepSeek-V4 attention paths under DET.
+
+    ``dsv4`` is accepted as a deterministic attention backend via the
+    model_overrides declaration (explicit-backend branch of
+    ``_deterministic_attention_backend``); DeepSeek-V4 is deliberately NOT
+    added to ``_deterministic_is_deepseek_model`` -- V4 must keep taking the
+    explicit branch, not the arch-based auto fallback (which would select
+    fa3 on Hopper). The deterministic V4 path covers the FlashMLA decode
+    kernel with a zero-split, one-request-per-partition schedule and the
+    v1 exact-radix indexer topk; these entry constraints fence off the
+    paths outside that coverage.
+    """
+    if not view.enable_deterministic_inference:
+        return {}
+    if view.attention_backend != "dsv4":
+        return {}
+    # Partial views in tests may lack the dsv4-specific fields; their
+    # defaults ("auto" / None) are accepted below.
+    dsv4_attn_backend = getattr(view, "dsv4_attn_backend", "auto")
+    dsv4_prefill_backend = getattr(view, "dsv4_prefill_backend", None)
+
+    if dsv4_attn_backend in ("trtllm", "flashmla_mega"):
+        raise ValueError(
+            f"--dsv4-attn-backend '{dsv4_attn_backend}' is not supported "
+            "with --enable-deterministic-inference: only the flashmla path "
+            "has batch-invariant coverage."
+        )
+    if dsv4_prefill_backend == "flashmla_sparse_q8":
+        raise ValueError(
+            "--dsv4-prefill-backend flashmla_sparse_q8 is not supported with "
+            "--enable-deterministic-inference: the Q8KV8 sparse prefill "
+            "kernels are not batch-invariant."
+        )
+    if view.attn_dp_size > 1:
+        raise ValueError(
+            "--enable-deterministic-inference with the dsv4 attention backend "
+            "requires --attn-dp-size 1: attention data parallelism routes "
+            "dummy idle-rank rows through EP grouped GEMM, which is not "
+            "batch-invariant."
+        )
+    if view.speculative_algorithm is not None:
+        raise ValueError(
+            "--enable-deterministic-inference with the dsv4 attention backend "
+            "does not support speculative decoding: the verify/draft_extend "
+            "paths have no batch-invariant coverage."
+        )
+    if view.disaggregation_mode != "null":
+        raise ValueError(
+            "--enable-deterministic-inference with the dsv4 attention backend "
+            "does not support PD disaggregation."
+        )
+    return {}
+
+
+@register_post_process
 def _deterministic_attention_backend(view: Any) -> dict:
     if not view.enable_deterministic_inference:
         return {}
