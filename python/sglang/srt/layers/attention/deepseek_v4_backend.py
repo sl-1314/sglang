@@ -324,6 +324,94 @@ def _maybe_precompute_flashmla_sched_meta(
     flashmla_metadata.num_splits = num_splits
 
 
+def _fill_deterministic_flashmla_sched(
+    flashmla_metadata,
+    *,
+    q: torch.Tensor,
+    indices: torch.Tensor,
+    topk_length: Optional[torch.Tensor],
+    extra_indices: Optional[torch.Tensor],
+    extra_topk_length: Optional[torch.Tensor],
+) -> None:
+    """Under deterministic inference, fill the FlashMLA schedule with a
+    zero-split layout: no request is ever split across partitions, so each
+    request's KV blocks are reduced by one CTA in block order whatever else
+    the batch holds, and the kernel skips its own batch-shaped ``<<<1, 32>>>``
+    planning. FlashMLA accepts any valid schedule, not only its own (the
+    "windowed" mode of flashmla_sched_meta relies on the same latitude).
+    """
+    if flashmla_metadata is None or not q.is_cuda:
+        return
+    if getattr(flashmla_metadata, "tile_scheduler_metadata", None) is not None:
+        # Filled once per metadata object: the first layer records the fill,
+        # the rest read the same tensors (a captured graph replays it).
+        return
+
+    from sglang.kernels.ops.attention.dsv4.flashmla_sched_meta import META_INTS
+    from sglang.kernels.ops.attention import flash_mla_interface
+
+    b, s_q, h_q = q.shape[0], q.shape[1], q.shape[2]
+    if flash_mla_interface.supports_native_heads():
+        # The row count the legacy sparse decode kernel itself would launch.
+        num_sm_parts = max(
+            flash_mla_interface.sparse_decode_num_sm_parts(b, s_q, h_q), 1
+        )
+    else:
+        num_sm_parts = max(_num_sms(q.device.index) // s_q, 1)
+
+    # sparse_seqlen_k per request, as flashmla_sched_meta.cuh computes it: the
+    # window count (never zero), rounded up to a block when an extra cache
+    # follows, plus the extra count.
+    if topk_length is not None:
+        lengths = topk_length.to(torch.int32).clamp_min(1)
+    else:
+        lengths = torch.full(
+            (b,), indices.shape[-1], dtype=torch.int32, device=q.device
+        )
+    if extra_indices is not None:
+        block = _FLASHMLA_SCHED_BLOCK_SIZE_N
+        lengths = (lengths + block - 1) // block * block
+        if extra_topk_length is not None:
+            lengths = lengths + extra_topk_length.to(torch.int32)
+        else:
+            lengths = lengths + extra_indices.shape[-1]
+    # last_block + 1: the end of the request's KV range in block units.
+    end_blocks = (lengths - 1) // _FLASHMLA_SCHED_BLOCK_SIZE_N + 1
+
+    num_splits = torch.arange(b + 1, dtype=torch.int32, device=q.device)
+    meta = torch.zeros((num_sm_parts, META_INTS), dtype=torch.int32, device=q.device)
+    rows = min(b, num_sm_parts)
+    if rows > 0:
+        if b <= num_sm_parts:
+            # One partition per request.
+            req = torch.arange(rows, dtype=torch.int32, device=q.device)
+            meta[:rows, 0] = req
+            meta[:rows, 1] = req
+            meta[:rows, 3] = end_blocks[:rows]
+        else:
+            # More requests than partitions: contiguous whole-request chunks,
+            # still zero-split, so per-request invariance is unchanged.
+            part_ids = torch.arange(num_sm_parts, device=q.device)
+            sizes = torch.full(
+                (num_sm_parts,), b // num_sm_parts, dtype=torch.int64, device=q.device
+            )
+            sizes = sizes + (part_ids < (b % num_sm_parts)).to(torch.int64)
+            bounds = torch.zeros(num_sm_parts + 1, dtype=torch.int64, device=q.device)
+            bounds[1:] = sizes.cumsum(0)
+            meta[:, 0] = bounds[:-1].to(torch.int32)
+            meta[:, 1] = (bounds[1:] - 1).to(torch.int32)
+            meta[:, 3] = end_blocks.index_select(0, bounds[1:] - 1)
+    if rows < num_sm_parts:
+        # Idle partitions in the shape the scheduler leaves them: past the
+        # batch, ending at the last request's end.
+        meta[rows:, 0] = b
+        meta[rows:, 1] = b - 1
+        if b > 0:
+            meta[rows:, 3] = end_blocks[b - 1]
+    flashmla_metadata.tile_scheduler_metadata = meta
+    flashmla_metadata.num_splits = num_splits
+
+
 def _flashmla_v41_splits_kv(
     indices: torch.Tensor, extra_indices: Optional[torch.Tensor], min_topk: int
 ) -> bool:
@@ -4558,6 +4646,23 @@ class DeepseekV4AttnBackend(
                 else:
                     flash_mla_with_kvcache = self._flash_mla_with_kvcache
 
+                if (
+                    get_exec().deterministic.enable_deterministic_inference
+                    and q.is_cuda
+                    and not self._swa_interleaved
+                ):
+                    # Deterministic inference replaces FlashMLA's own
+                    # batch-shaped split-KV planning with a zero-split
+                    # schedule; the dsv41 fast precompute below then no-ops on
+                    # the filled metadata.
+                    _fill_deterministic_flashmla_sched(
+                        flashmla_metadata,
+                        q=q,
+                        indices=swa_page_indices,
+                        topk_length=swa_topk_lengths,
+                        extra_indices=extra_indices,
+                        extra_topk_length=extra_topk_lengths,
+                    )
                 if self.is_dsv41 and (
                     not self._swa_interleaved
                     or _flashmla_v41_splits_kv(
