@@ -3039,12 +3039,16 @@ class DeepseekV4AttnBackend(
             and not use_dsv4_q8kv8_sparse_prefill(self.dsv4_prefill_backend)
         )
 
+        # Deterministic inference skips the sparse prefill path entirely so
+        # prefill runs the same flash_mla_with_kvcache kernel as decode
+        # (per-row windows): prefill/decode bitwise equality by construction.
         return (
             not self.trtllm_attn
             and forward_batch.forward_mode.is_extend_without_speculative()
             and (not cp_active or cp_sparse_prefill)
             and not get_platform().is_sm120
             and self.forward_metadata.late_layer_tail is None
+            and not get_exec().deterministic.enable_deterministic_inference
             and (
                 cp_sparse_prefill
                 or num_qo_tokens > _LARGE_INDEXER_QUERY_THRESHOLD

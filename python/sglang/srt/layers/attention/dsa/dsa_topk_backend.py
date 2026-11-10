@@ -50,6 +50,12 @@ class DSATopKBackend(Enum):
         return self == DSATopKBackend.FLASHINFER
 
     def should_use_topk_v2(self) -> bool:
+        # Deterministic inference pins the v1 path: the v2 persistent/cluster
+        # kernel plans its work distribution from seq_lens heuristics, which
+        # is not batch-invariant, while v1 is an exact radix with tie-break
+        # (same constraint style as num_splits=1 in dsa_backend).
+        if get_exec().deterministic.enable_deterministic_inference:
+            return False
         return self.is_sgl_kernel() and envs.SGLANG_OPT_USE_TOPK_V2.get()
 
     def topk_func(
