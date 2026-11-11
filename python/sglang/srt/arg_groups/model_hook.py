@@ -151,6 +151,11 @@ def handle_model_specific_adjustments(server_args: Any):
             server_args,
             "_handle_model_specific_adjustments",
             enforce_disable_flashinfer_allreduce_fusion=True,
+            # Autotune selects tactics by first-call benchmark timing, which
+            # drifts across cold engine restarts and flips greedy tokens at
+            # near-ties (observed on DSV4 proxy: two cold DET engines diverged
+            # on output ids with autotune on; bit-identical with it off).
+            disable_flashinfer_autotune=True,
         )
 
     declare_resolution(
