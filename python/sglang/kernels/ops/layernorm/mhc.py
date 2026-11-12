@@ -1125,6 +1125,16 @@ def mhc_pre(
 
     if _use_deep_gemm_hc_prenorm():
         n_splits = _compute_num_split_for_mhc_pre(num_tokens, hc_hidden_size)
+        from sglang.srt.batch_invariant_ops import is_batch_invariant_mode_enabled
+
+        if is_batch_invariant_mode_enabled():
+            # Batch-invariant mode: _compute_num_split_for_mhc_pre buckets
+            # num_tokens by ceil(M/64) blocks, so crossing a bucket boundary
+            # changes the split count and with it the partial-sum reduction
+            # order of the TF32 prenorm GEMM. Pin the split count so the same
+            # rows round identically in solo and mixed batches (validated
+            # bitwise for M in {7, 11, 144}, hidden 4096 and 5120).
+            n_splits = 8
 
         gemm_out_mul = torch.empty(
             n_splits, num_tokens, hc_mult3, dtype=torch.float32, device=residual.device
@@ -1705,10 +1715,21 @@ def mhc_fused_post_pre(
 
     # The scalar-FMA kernel wins only for small batches where launch
     # overhead dominates; beyond the threshold DeepGEMM's tensor-core path wins.
-    fma_token_threshold = 32
+    # Batch-invariant mode pins the whole dispatch instead: the default
+    # M-bucketed config (tile_n / n_splits / FMA-vs-DeepGEMM selected by
+    # num_tokens) changes the split-K reduction order across batch sizes, so
+    # the same rows round differently in a solo batch than in a mixed one.
+    # The pinned FMA config is row-invariant for every num_tokens (validated
+    # bitwise for M in {7, 11, 144}, hidden 4096 and 5120).
+    from sglang.srt.batch_invariant_ops import is_batch_invariant_mode_enabled
+
+    _batch_invariant = is_batch_invariant_mode_enabled()
+    fma_token_threshold = 1 << 30 if _batch_invariant else 32
     if num_tokens <= fma_token_threshold:
         tile_n = 2 if num_tokens < 8 else 3
         n_splits = 8 if (num_tokens < 8 and hidden_size <= 4096) else 4
+        if _batch_invariant:
+            tile_n, n_splits = 3, 4
     else:
         n_splits = _compute_num_split_for_mhc_pre(num_tokens, hc_hidden_size)
 
