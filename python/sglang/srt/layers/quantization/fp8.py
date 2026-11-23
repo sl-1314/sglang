@@ -2519,6 +2519,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     scale_param.data = torch.stack(new_scales).float()
                     scale_param.format_ue8m0 = False
                 self.is_fp4_expert = False
+                self.weight_block_size = [128, 128]
+                self.w2_weight_block_size = None
                 logger.warning_once("Dequantized FP4 expert weights to FP8.")
 
             if self.is_fp4_expert:
@@ -3535,7 +3537,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             w2_weight = layer.w2_weight
 
             if self.block_quant:
-                block_shape = self.quant_config.weight_block_size
+                block_shape = self.weight_block_size
                 w13_scale = layer.w13_weight_scale_inv
                 w2_scale = layer.w2_weight_scale_inv
             else:

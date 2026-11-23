@@ -199,7 +199,7 @@ def _masked_activation_unsupported_reason(
         return (
             f"masked activation group_size {group_size}, DSV4 JIT kernel requires 128"
         )
-    if d % (group_size * 4) != 0:
+    if deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0 and d % (group_size * 4) != 0:
         return f"D ({d}) not divisible by 4 * group_size"
     return None
 
@@ -1636,11 +1636,18 @@ def _varlen_deep_gemm_silu_mul_quant(
     # Only explicit precision requests opt additional callers into this kernel;
     # the generic fused quantizer rounds its SiLU intermediates to BF16.
     if swiglu_limit is not None or swizzle or silu_mul_keep_fp32:
-        assert N % 4 == 0 and G % 4 == 0 and D // 8 >= E, (
-            "DSV4 JIT activation requires N % 4 == 0, G % 4 == 0 and "
-            f"D // 8 >= num_experts, got N={N} G={G} D={D} E={E}"
-        )
         packed_ue8m0 = deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0
+        assert (
+            N % 4 == 0
+            and D % group_size == 0
+            and (not packed_ue8m0 or G % 4 == 0)
+            and D // 8 >= E
+        ), (
+            "DSV4 JIT activation requires N % 4 == 0, D % group_size == 0, "
+            "(G % 4 == 0 for packed UE8M0) and "
+            f"D // 8 >= num_experts, got N={N} G={G} D={D} E={E} "
+            f"group_size={group_size} packed_ue8m0={packed_ue8m0}"
+        )
         down_input = torch.empty(
             (E, N, D), device=hidden_states_device, dtype=torch.float8_e4m3fn
         )
