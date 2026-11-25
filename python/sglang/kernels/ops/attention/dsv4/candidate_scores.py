@@ -79,6 +79,14 @@ def _mask_scores(
 
 def can_use_candidate_scores(q, k, weights, candidate_width: int, lc: int) -> bool:
     """Whether candidate scoring supports these operands and reduces the score width."""
+    from sglang.srt.batch_invariant_ops import is_batch_invariant_mode_enabled
+    from sglang.srt.runtime_context import get_exec
+
+    if (
+        is_batch_invariant_mode_enabled()
+        or get_exec().deterministic.enable_deterministic_inference
+    ):
+        return False
     return (
         candidate_width > 0
         and candidate_width * 2 <= lc

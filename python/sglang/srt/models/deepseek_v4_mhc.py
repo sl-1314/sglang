@@ -372,6 +372,12 @@ def _mix_stats_impl(hc: HcSubLayer, x: torch.Tensor) -> HcTriplet:
     from sglang.srt.batch_invariant_ops import (
         is_batch_invariant_mode_enabled,
     )
+    from sglang.srt.runtime_context import get_exec
+
+    is_deterministic = (
+        is_batch_invariant_mode_enabled()
+        or get_exec().deterministic.enable_deterministic_inference
+    )
 
     parts = bf16_parts = None
     hopper_medium = get_platform().is_sm90 and 32 <= x_flat.shape[0] < 4096
@@ -383,7 +389,7 @@ def _mix_stats_impl(hc: HcSubLayer, x: torch.Tensor) -> HcTriplet:
             get_platform().is_sm100 or get_platform().is_sm90 or get_platform().is_sm120
         )
         and envs.SGLANG_OPT_DEEPGEMM_HC_PRENORM.get()
-        and not is_batch_invariant_mode_enabled()
+        and not is_deterministic
     ):
         parts, bf16_parts = hc.tf32_parts, hc.bf16_parts
 
@@ -396,8 +402,10 @@ def _mix_stats_impl(hc: HcSubLayer, x: torch.Tensor) -> HcTriplet:
     use_bf16_projection = bf16_parts is not None and (
         hopper_medium or bf16_decode_grid or 4096 <= x_flat.shape[0] <= 65536
     )
-    hopper_fused_stats = get_platform().is_sm90 and (
-        x.shape[0] == 1 or (bf16_parts is not None and 32 <= x.shape[0] <= 65536)
+    hopper_fused_stats = (
+        get_platform().is_sm90
+        and not is_deterministic
+        and (x.shape[0] == 1 or (bf16_parts is not None and 32 <= x.shape[0] <= 65536))
     )
     # gfx950 uses the fused Triton port at every row count (MI350X).
     use_fused_stats = _is_gfx95_supported or (
@@ -537,12 +545,18 @@ def _combine(
     if apply_pre is None:
         return norm(x[:, 0, :])
     from sglang.srt.batch_invariant_ops import is_batch_invariant_mode_enabled
+    from sglang.srt.runtime_context import get_exec
+
+    is_deterministic = (
+        is_batch_invariant_mode_enabled()
+        or get_exec().deterministic.enable_deterministic_inference
+    )
 
     hopper_fused = (
         get_platform().is_sm90
         and not quantize
         and (0 < x.shape[0] <= 96 or 4096 <= x.shape[0] <= 65536)
-        and not is_batch_invariant_mode_enabled()
+        and not is_deterministic
     )
     if (
         x.is_cuda
@@ -624,12 +638,19 @@ def post(
         return mhc_post(x, residual, post_mix, comb)
 
     if envs.SGLANG_OPT_USE_TILELANG_MHC_POST.get():
+        from sglang.srt.runtime_context import get_exec
+
+        is_deterministic = (
+            is_batch_invariant_mode_enabled()
+            or get_exec().deterministic.enable_deterministic_inference
+        )
         if (
             cfg.pre_from_prev
             and get_platform().is_sm90
             and cfg.mult == 4
             and cfg.hidden == 5120
             and 1 <= x.shape[0] <= 64
+            and not is_deterministic
         ):
             return mhc_post_split_h(x, residual, post_mix, comb)
 
@@ -711,6 +732,8 @@ def _can_use_mega_mhc(cfg: HcConfig) -> bool:
 
 
 def _can_use_decode_post_combine(cfg: HcConfig, rows: int) -> bool:
+    from sglang.srt.runtime_context import get_exec
+
     return (
         0 < rows <= DECODE_POST_COMBINE_MAX_ROWS
         and get_platform().is_blackwell
@@ -718,7 +741,10 @@ def _can_use_decode_post_combine(cfg: HcConfig, rows: int) -> bool:
         and cfg.mult == 4
         and cfg.hidden == 5120
         and not cfg.cp_prefill
-        and not is_batch_invariant_mode_enabled()
+        and not (
+            is_batch_invariant_mode_enabled()
+            or get_exec().deterministic.enable_deterministic_inference
+        )
     )
 
 

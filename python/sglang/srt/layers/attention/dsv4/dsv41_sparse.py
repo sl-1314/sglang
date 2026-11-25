@@ -192,11 +192,16 @@ _TINY_GEMM_SHAPES = ((32, 5120), (128, 512))
 
 def _tiny_gemm_max_m(n: int, k: int) -> int:
     # -1 means the device or checkpoint shape requires the linear fallback.
+    from sglang.srt.batch_invariant_ops import is_batch_invariant_mode_enabled
+    from sglang.srt.runtime_context import get_exec
+
     if (
         (n, k) not in _TINY_GEMM_SHAPES
         or not torch.cuda.is_available()
         or torch.version.hip is not None
         or torch.cuda.get_device_capability()[0] < 9
+        or is_batch_invariant_mode_enabled()
+        or get_exec().deterministic.enable_deterministic_inference
     ):
         return -1
     return 32

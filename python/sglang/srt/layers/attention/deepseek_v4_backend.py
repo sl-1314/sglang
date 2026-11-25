@@ -346,6 +346,110 @@ def _maybe_precompute_flashmla_sched_meta(
     flashmla_metadata.num_splits = num_splits
 
 
+@functools.lru_cache(maxsize=None)
+def _unsplit_flashmla_sched_template(
+    b: int, num_sm_parts: int, device_index: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Static (b, num_sm_parts) schedule skeleton and gather indices on GPU.
+
+    Keeping this cached off-graph ensures zero D2H sync or unpinned H2D copies
+    during CUDA graph capture and replay.
+    """
+    from sglang.kernels.ops.attention.dsv4.flashmla_sched_meta import META_INTS
+
+    device = torch.device("cuda", device_index)
+    active = min(b, num_sm_parts)
+    rows = []
+    last_req_indices = []
+    if active > 0:
+        base, rem = divmod(b, active)
+        cur = 0
+        for p in range(num_sm_parts):
+            if p < active:
+                cnt = base + (1 if p < rem else 0)
+                last_r = cur + cnt - 1
+                rows.append([cur, last_r, 0, 0, 0, 0, 0, 0])
+                last_req_indices.append(last_r)
+                cur += cnt
+            else:
+                rows.append([b, b - 1, 0, 0, 0, 0, 0, 0])
+                last_req_indices.append(b - 1)
+    else:
+        rows = [[b, b - 1, 0, 1, 0, 0, 0, 0] for _ in range(num_sm_parts)]
+        last_req_indices = []
+
+    assert len(rows) == num_sm_parts and len(rows[0]) == META_INTS
+    base_meta = torch.tensor(rows, dtype=torch.int32, device=device)
+    last_req_idx_t = torch.tensor(last_req_indices, dtype=torch.long, device=device)
+    num_splits = torch.arange(b + 1, dtype=torch.int32, device=device)
+    return base_meta, last_req_idx_t, num_splits
+
+
+def _populate_unsplit_flashmla_sched_meta(
+    flashmla_metadata,
+    *,
+    q: torch.Tensor,
+    indices: torch.Tensor,
+    topk_length: Optional[torch.Tensor],
+    extra_indices: Optional[torch.Tensor],
+    extra_topk_length: Optional[torch.Tensor],
+) -> None:
+    """Populate an unsplit FlashMLASchedMeta for SM90 deterministic/BI mode.
+
+    Purely GPU-side so it works inside CUDA graph capture and replay without
+    D2H/H2D synchronization.
+    """
+    if flashmla_metadata is None or not q.is_cuda or not get_platform().is_sm90:
+        return
+    from sglang.kernels.ops.attention import flash_mla_interface
+
+    b, s_q, h_q = q.shape[0], q.shape[1], q.shape[2]
+    num_sm_parts = (
+        flash_mla_interface.sparse_decode_num_sm_parts(b, s_q, h_q)
+        if flash_mla_interface.supports_native_heads()
+        else max(_num_sms(q.device.index) // s_q, 1)
+    )
+    # Match FlashMLA's sparse_seqlen_k + sparse_num_blocks per request:
+    # topk_length==0 is clamped to 1, and each request's end_block_idx on a
+    # partition must equal that request's exact block count (not the padded max
+    # width of indices), otherwise splitkv_mla reads past topk_length and
+    # combine.cu accesses invalid split buffers.
+    if topk_length is not None:
+        swa_blocks_per_req = (topk_length.clamp(min=1) + 63) // 64
+    else:
+        swa_blocks_per_req = torch.full(
+            (b,),
+            max((indices.shape[-1] + 63) // 64, 1),
+            dtype=torch.int32,
+            device=q.device,
+        )
+    if extra_indices is not None:
+        if extra_topk_length is not None:
+            ex_blocks_per_req = (extra_topk_length + 63) // 64
+        else:
+            ex_blocks_per_req = torch.full(
+                (b,),
+                (extra_indices.shape[-1] + 63) // 64,
+                dtype=torch.int32,
+                device=q.device,
+            )
+        total_blocks_per_req = (swa_blocks_per_req + ex_blocks_per_req).to(torch.int32)
+    else:
+        total_blocks_per_req = swa_blocks_per_req.to(torch.int32)
+
+    base_meta, last_req_idx_t, num_splits = _unsplit_flashmla_sched_template(
+        b, num_sm_parts, q.device.index
+    )
+    meta = base_meta.clone()
+    if last_req_idx_t.numel() > 0:
+        meta[:, 3] = total_blocks_per_req.index_select(0, last_req_idx_t)
+
+    flashmla_metadata.have_initialized = False
+    flashmla_metadata.config = None
+    flashmla_metadata.tile_scheduler_metadata = meta
+    flashmla_metadata.num_splits = num_splits
+
+
 def _flashmla_v41_splits_kv(
     indices: torch.Tensor, extra_indices: Optional[torch.Tensor], min_topk: int
 ) -> bool:
@@ -3075,6 +3179,14 @@ class DeepseekV4AttnBackend(
     def _use_sparse_prefill(
         self, forward_batch: ForwardBatch, *, num_qo_tokens: int
     ) -> bool:
+        from sglang.srt.batch_invariant_ops import is_batch_invariant_mode_enabled
+        from sglang.srt.runtime_context import get_exec
+
+        if (
+            is_batch_invariant_mode_enabled()
+            or get_exec().deterministic.enable_deterministic_inference
+        ):
+            return False
 
         cp_active = is_cp_active(forward_batch)
         cp_sparse_prefill = (
@@ -4608,7 +4720,25 @@ class DeepseekV4AttnBackend(
                 else:
                     flash_mla_with_kvcache = self._flash_mla_with_kvcache
 
-                if self.is_dsv41 and (
+                from sglang.srt.batch_invariant_ops import (
+                    is_batch_invariant_mode_enabled,
+                )
+                from sglang.srt.runtime_context import get_exec
+
+                is_deterministic = (
+                    is_batch_invariant_mode_enabled()
+                    or get_exec().deterministic.enable_deterministic_inference
+                )
+                if is_deterministic and get_platform().is_sm90:
+                    _populate_unsplit_flashmla_sched_meta(
+                        flashmla_metadata,
+                        q=q,
+                        indices=swa_page_indices,
+                        topk_length=swa_topk_lengths,
+                        extra_indices=extra_indices,
+                        extra_topk_length=extra_topk_lengths,
+                    )
+                elif self.is_dsv41 and (
                     not self._swa_interleaved
                     or _flashmla_v41_splits_kv(
                         swa_page_indices,

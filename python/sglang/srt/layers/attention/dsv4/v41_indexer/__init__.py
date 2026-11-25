@@ -81,10 +81,27 @@ def _use_deep_gemm_prefill() -> bool:
     return is_sm100_or_newer() and has_dense_fp4_indexer()
 
 
+def _is_deterministic_mode() -> bool:
+    from sglang.srt.batch_invariant_ops import is_batch_invariant_mode_enabled
+    from sglang.srt.runtime_context import get_exec
+
+    return (
+        is_batch_invariant_mode_enabled()
+        or get_exec().deterministic.enable_deterministic_inference
+    )
+
+
 @functools.cache
-def _use_sm90_prefill_scores() -> bool:
+def _use_sm90_prefill_scores_supported() -> bool:
     # The batched prefill with flat_index_logits_tiles on DeepGEMM's fp8 kernel.
     return flat_index_logits_widen_to_fp8() and has_dense_fp4_indexer()
+
+
+def _use_sm90_prefill_scores() -> bool:
+    return (
+        not _is_deterministic_mode()
+        and _use_sm90_prefill_scores_supported()
+    )
 
 
 def make_full_topk_indexer(

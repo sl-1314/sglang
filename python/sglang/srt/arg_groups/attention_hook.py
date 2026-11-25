@@ -644,6 +644,8 @@ def handle_deterministic_inference(server_args: Any):
                     "DeepseekV2ForCausalLM",
                     "DeepseekV3ForCausalLM",
                     "DeepseekV32ForCausalLM",
+                    "DeepseekV4ForCausalLM",
+                    "DeepseekV41ForCausalLM",
                     "MistralLarge3ForCausalLM",
                     "PixtralForConditionalGeneration",
                     "GlmMoeDsaForCausalLM",

@@ -539,6 +539,14 @@ def _apply_wo_a_bf16_matmul(
         )
         and _hip.wo_a_split_k_allowed()
     )
+    from sglang.srt.batch_invariant_ops import is_batch_invariant_mode_enabled
+    from sglang.srt.runtime_context import get_exec
+
+    is_deterministic = (
+        is_batch_invariant_mode_enabled()
+        or get_exec().deterministic.enable_deterministic_inference
+    )
+
     if (
         (
             fast_path
@@ -547,7 +555,10 @@ def _apply_wo_a_bf16_matmul(
                 (
                     is_decode
                     and o.shape[0] == 1
-                    and (get_platform().is_blackwell or get_platform().is_sm90)
+                    and (
+                        get_platform().is_blackwell
+                        or (get_platform().is_sm90 and not is_deterministic)
+                    )
                 )
                 or (
                     is_target_verify
@@ -3395,6 +3406,7 @@ class DeepseekV4DecoderLayerBase(nn.Module):
         )
 
         from sglang.srt.batch_invariant_ops import is_batch_invariant_mode_enabled
+        from sglang.srt.runtime_context import get_exec
 
         # The original FP32 parameters stay intact for small rows and invariant mode.
         self._hc_attn_tf32_parts = self._hc_ffn_tf32_parts = None
@@ -3409,7 +3421,10 @@ class DeepseekV4DecoderLayerBase(nn.Module):
             and self.hc_attn_fn.shape == (24, 20480)
             and envs.SGLANG_OPT_DEEPGEMM_HC_PRENORM.get()
             and getattr(self.config, "model_type", None) == "deepseek_v41"
-            and not is_batch_invariant_mode_enabled()
+            and not (
+                is_batch_invariant_mode_enabled()
+                or get_exec().deterministic.enable_deterministic_inference
+            )
         ):
             from sglang.kernels.ops.layernorm.mhc import split_bf16_hc_weight
 

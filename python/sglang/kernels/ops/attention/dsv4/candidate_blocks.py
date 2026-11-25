@@ -125,6 +125,8 @@ def amax_topk_blocks(
     nblocks: torch.Tensor,
     topk_blocks: int,
     max_seq_len: Optional[int] = None,
+    *,
+    deterministic: bool = False,
 ) -> torch.Tensor:
     """Per row the ``topk_blocks`` blocks of 8 positions with the largest block
     maximum among its first ``seq_lens[b]`` positions, the newest block always
@@ -143,7 +145,9 @@ def amax_topk_blocks(
     )
     amax8_varlen(logits, seq_lens, out=keys)
     blocks = torch.empty(rows, topk_blocks, dtype=torch.int32, device=logits.device)
-    topk_transform_paged_v2(keys, nblocks, None, blocks, 1, plan)
+    topk_transform_paged_v2(
+        keys, nblocks, None, blocks, 1, plan, deterministic=deterministic
+    )
     return blocks
 
 

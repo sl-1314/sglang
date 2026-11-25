@@ -458,8 +458,47 @@ def handle_a2a_moe(server_args: Any):
         )
 
     if a2a_backend == "deepep":
+        if cfg.enable_deterministic_inference and cfg.deepep_mode == "auto":
+            declare_resolution(
+                server_args,
+                "_handle_a2a_moe",
+                deepep_mode="low_latency",
+            )
+            logger.warning(
+                "Forcing --deepep-mode low_latency because deterministic inference is enabled: "
+                "DeepEP auto mode switches between normal (prefill) and low_latency (decode), "
+                "which use different FP8 quantization and combine reduction kernels. "
+                "low_latency covers both prefill and decode and keeps decode CUDA graphs enabled."
+            )
+        if resolved_view(server_args).deepep_mode == "low_latency" and cfg.enable_deterministic_inference:
+            # DeepEP low_latency buffer requires per-rank prefill tokens <= 1024
+            # (FINISHED_SUM_TAG=1024 in DeepEP internode_ll) and <=
+            # SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK.
+            per_rank_prefill = (
+                cfg.chunked_prefill_size
+                if cfg.chunked_prefill_size and cfg.chunked_prefill_size > 0
+                else 1024
+            )
+            if per_rank_prefill > 1024:
+                declare_resolution(
+                    server_args,
+                    "_handle_a2a_moe",
+                    chunked_prefill_size=1024,
+                )
+                logger.warning(
+                    f"Clamping per-rank chunked_prefill_size from {per_rank_prefill} to 1024 "
+                    "for deterministic DeepEP low_latency mode (DeepEP FINISHED_SUM_TAG=1024)."
+                )
+                per_rank_prefill = 1024
+            max_ll_tokens = envs.SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK.get()
+            if max_ll_tokens < per_rank_prefill:
+                envs.SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK.set(per_rank_prefill)
+                logger.warning(
+                    f"Raising SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK from "
+                    f"{max_ll_tokens} to {per_rank_prefill} for deterministic DeepEP low_latency."
+                )
         if cfg.moe_runner_backend == "flashinfer_cutedsl":
-            if cfg.deepep_mode == "auto":
+            if resolved_view(server_args).deepep_mode == "auto":
                 declare_resolution(
                     server_args,
                     "_handle_a2a_moe",
@@ -471,14 +510,14 @@ def handle_a2a_moe(server_args: Any):
                     "deepep auto mode would crash during prefill. "
                     "low_latency covers both prefill and decode."
                 )
-            elif cfg.deepep_mode == "normal":
+            elif resolved_view(server_args).deepep_mode == "normal":
                 raise ValueError(
                     "flashinfer_cutedsl FP4 MoE only supports DeepEP "
                     "low_latency dispatch (masked layout). DeepEP normal "
                     "(prefill) dispatch has no CuteDSL FP4 handler. Pass "
                     "--deepep-mode low_latency or auto."
                 )
-        if cfg.deepep_mode == "normal":
+        if resolved_view(server_args).deepep_mode == "normal":
             logger.warning("Cuda graph is disabled because deepep_mode=`normal`")
             declare_resolution(
                 server_args,

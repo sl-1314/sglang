@@ -1611,7 +1611,14 @@ def _ue8m0_deepgemm_skips_block32(
 
 
 def _fp8_block_gemv_enabled() -> bool:
-    return envs.SGLANG_ENABLE_FP8_BLOCK_GEMV.get() and get_platform().is_sm90
+    from sglang.srt.batch_invariant_ops import is_batch_invariant_mode_enabled
+
+    return (
+        envs.SGLANG_ENABLE_FP8_BLOCK_GEMV.get()
+        and get_platform().is_sm90
+        and not is_batch_invariant_mode_enabled()
+        and not get_exec().deterministic.enable_deterministic_inference
+    )
 
 
 def _use_fp8_block_gemv(

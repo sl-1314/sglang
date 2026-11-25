@@ -102,8 +102,19 @@ class DenseBlocksBackend:
             return None
         if isinstance(d, PagedDecodeScores):
             assert self.block_size == 8
+            from sglang.srt.batch_invariant_ops import is_batch_invariant_mode_enabled
+            from sglang.srt.runtime_context import get_exec
+
+            deterministic = (
+                is_batch_invariant_mode_enabled()
+                or get_exec().deterministic.enable_deterministic_inference
+            )
             blocks = amax_topk_blocks(
-                d.scores, d.lens, (d.lens + 7) // 8, self.topk_blocks
+                d.scores,
+                d.lens,
+                (d.lens + 7) // 8,
+                self.topk_blocks,
+                deterministic=deterministic,
             )
             published = BlockIds(
                 blocks=blocks,

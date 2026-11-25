@@ -60,8 +60,17 @@ class FullTopKIndexer:
         self.use_deep_gemm_prefill = use_deep_gemm_prefill
         self.use_prefill_lite_topk = use_prefill_lite_topk
         self.use_deep_gemm_decode = use_deep_gemm_decode
+        from sglang.srt.batch_invariant_ops import is_batch_invariant_mode_enabled
+        from sglang.srt.runtime_context import get_exec
+
+        is_deterministic = (
+            is_batch_invariant_mode_enabled()
+            or get_exec().deterministic.enable_deterministic_inference
+        )
         self.use_deep_select_decode = (
-            not use_deep_gemm_decode and is_deep_select_supported()
+            not use_deep_gemm_decode
+            and not is_deterministic
+            and is_deep_select_supported()
         )
 
     def topk_prefill(self, inputs: PrefillInputs) -> None:

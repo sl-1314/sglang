@@ -336,8 +336,20 @@ def topk_ragged(
         )
         return
     from sglang.kernels.ops.attention.dsv4 import topk_transform_ragged_v2
+    from sglang.srt.batch_invariant_ops import is_batch_invariant_mode_enabled
+    from sglang.srt.runtime_context import get_exec
 
-    topk_transform_ragged_v2(logits, lens, out_offsets=offsets, out_indices=out)
+    deterministic = (
+        is_batch_invariant_mode_enabled()
+        or get_exec().deterministic.enable_deterministic_inference
+    )
+    topk_transform_ragged_v2(
+        logits,
+        lens,
+        out_offsets=offsets,
+        out_indices=out,
+        deterministic=deterministic,
+    )
 
 
 def dense_prefill_topk(
@@ -587,6 +599,17 @@ def decode_scores(
     # V4 reserves the replay bound in metadata; visibility stays on device.
     # A capture-time length read would both synchronize and truncate replay.
     lmax = min(metadata.max_compressed_seq_len, req_to_token.shape[1] // ratio)
+    from sglang.srt.batch_invariant_ops import is_batch_invariant_mode_enabled
+    from sglang.srt.runtime_context import get_exec
+
+    deterministic = (
+        is_batch_invariant_mode_enabled()
+        or get_exec().deterministic.enable_deterministic_inference
+    )
+    if deterministic:
+        # Mode 2 deterministic topk_v2 packs a 20-bit column index (L <= 2^20),
+        # while req_to_token includes +4 headroom past context_len=2^20.
+        lmax = min(lmax, 1 << 20)
     if lmax == 0:
         inputs.reset_outputs()
         return None
@@ -637,8 +660,17 @@ def select_decode(
     k = min(topk, d.lmax)
     if isinstance(d, PagedDecodeScores):
         assert d.plan is not None, "paged select_decode needs the top-k v2 plan"
+        from sglang.srt.batch_invariant_ops import is_batch_invariant_mode_enabled
+        from sglang.srt.runtime_context import get_exec
+
+        deterministic = (
+            is_batch_invariant_mode_enabled()
+            or get_exec().deterministic.enable_deterministic_inference
+        )
         idx = torch.empty((d.bs, k), dtype=torch.int32, device=d.scores.device)
-        topk_transform_paged_v2(d.scores, d.lens, None, idx, 1, d.plan)
+        topk_transform_paged_v2(
+            d.scores, d.lens, None, idx, 1, d.plan, deterministic=deterministic
+        )
         finish_paged_indexer_topk(
             idx,
             d.scores,

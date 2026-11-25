@@ -172,6 +172,7 @@ DFLASH_MLA_ONLY_DRAFT_BACKENDS = ("cutedsl_mla", "trtllm_mla")
 
 DETERMINISTIC_ATTENTION_BACKEND_CHOICES = [
     "ascend",
+    "dsv4",
     "fa3",
     "fa4",
     "flashinfer",
@@ -328,7 +329,13 @@ add_deterministic_attention_backend_choices = (
     DETERMINISTIC_ATTENTION_BACKEND_CHOICES.extend
 )
 
-RADIX_SUPPORTED_DETERMINISTIC_ATTENTION_BACKEND = ["ascend", "fa3", "fa4", "triton"]
+RADIX_SUPPORTED_DETERMINISTIC_ATTENTION_BACKEND = [
+    "ascend",
+    "dsv4",
+    "fa3",
+    "fa4",
+    "triton",
+]
 add_radix_supported_deterministic_attention_backend_choices = (
     RADIX_SUPPORTED_DETERMINISTIC_ATTENTION_BACKEND.extend
 )
