@@ -16,12 +16,15 @@ from sglang.kernels.ops.attention.dsv4.candidate_blocks import (
     topk_among_blocks,
 )
 from sglang.kernels.ops.attention.dsv4.index_logits import FLAT_LOGITS_WIDTH_ALIGN
+from sglang.kernels.ops.attention.dsv4.topk import topk_transform_ragged_v2
 
 from .scoring import (
     DeepGEMMPrefillData,
     PagedDecodeScores,
+    align_scores_for_topk,
     decode_scores,
     get_deep_gemm_prefill_data,
+    is_deterministic_mode,
     prefill_requests,
     score_tiles,
     select_decode,
@@ -200,23 +203,52 @@ class DenseBlocksBackend:
 
     def _torch_publish_prefill(self, inputs: PrefillInputs):
         picked = []  # (query rows, their block ids) per scored chunk
+        deterministic = is_deterministic_mode()
         for request, chunks in prefill_requests(
             inputs=inputs,
             token_to_kv_pool=self.token_to_kv_pool,
         ):
             for chunk in chunks:
-                picked.append(
-                    (
-                        chunk.tok,
-                        select_candidate_block_ids(
-                            chunk.scores,
-                            chunk.lens[:, None],
-                            topk_blocks=self.topk_blocks,
-                            block_size=self.block_size,
-                        ),
+                if (
+                    deterministic
+                    and chunk.scores.is_cuda
+                    and torch.version.cuda is not None
+                ):
+                    assert self.block_size == 8
+                    scores_aligned = align_scores_for_topk(chunk.scores)
+                    lens32 = chunk.lens.to(torch.int32)
+                    nblocks = (lens32 + 7) // 8
+                    block_ids = amax_topk_blocks(
+                        scores_aligned,
+                        lens32,
+                        nblocks,
+                        self.topk_blocks,
+                        max_seq_len=request.lc,
+                        deterministic=True,
                     )
-                )
-                idx = chunk.scores.topk(request.k, dim=-1, sorted=False).indices
+                    zero_offsets = torch.zeros_like(lens32)
+                    idx = torch.empty(
+                        (chunk.scores.shape[0], request.k),
+                        dtype=torch.int32,
+                        device=chunk.scores.device,
+                    )
+                    topk_transform_ragged_v2(
+                        scores_aligned,
+                        lens32,
+                        out_offsets=zero_offsets,
+                        out_indices=idx,
+                        deterministic=True,
+                    )
+                    idx = idx.masked_fill(idx < 0, request.lc)
+                else:
+                    block_ids = select_candidate_block_ids(
+                        chunk.scores,
+                        chunk.lens[:, None],
+                        topk_blocks=self.topk_blocks,
+                        block_size=self.block_size,
+                    )
+                    idx = chunk.scores.topk(request.k, dim=-1, sorted=False).indices
+                picked.append((chunk.tok, block_ids))
                 write_prefill(inputs, request, chunk, idx)
         width = max((ids.shape[1] for _, ids in picked), default=0)
         blocks = torch.full(
@@ -237,6 +269,7 @@ class DenseBlocksBackend:
         if published is None:  # a DeepGEMM publish with no visible position
             inputs.reset_outputs()
             return
+        deterministic = is_deterministic_mode()
         for request, chunks in prefill_requests(
             inputs=inputs,
             token_to_kv_pool=self.token_to_kv_pool,
@@ -244,7 +277,37 @@ class DenseBlocksBackend:
             candidate_block_size=self.block_size,
         ):
             for chunk in chunks:
-                if chunk.candidate_only:
+                if (
+                    deterministic
+                    and chunk.scores.is_cuda
+                    and torch.version.cuda is not None
+                ):
+                    assert not chunk.candidate_only
+                    scores_aligned = align_scores_for_topk(chunk.scores)
+                    mask = candidate_block_mask(
+                        published.blocks[chunk.tok],
+                        scores_aligned.shape[1],
+                        self.block_size,
+                    )
+                    masked_scores = scores_aligned.masked_fill(~mask, -torch.inf)
+                    lens32 = chunk.lens.to(torch.int32)
+                    zero_offsets = torch.zeros_like(lens32)
+                    idx = torch.empty(
+                        (chunk.scores.shape[0], request.k),
+                        dtype=torch.int32,
+                        device=chunk.scores.device,
+                    )
+                    topk_transform_ragged_v2(
+                        masked_scores,
+                        lens32,
+                        out_offsets=zero_offsets,
+                        out_indices=idx,
+                        deterministic=True,
+                    )
+                    picked_scores = masked_scores.gather(1, idx.clamp_min(0).long())
+                    invalid = (idx < 0) | ~(picked_scores > -torch.inf)
+                    idx = idx.masked_fill(invalid, request.lc)
+                elif chunk.candidate_only:
                     idx = candidate_topk(
                         chunk.scores,
                         published.blocks[chunk.tok],
@@ -259,9 +322,8 @@ class DenseBlocksBackend:
                         request.k,
                         block_size=self.block_size,
                     )
-                write_prefill(
-                    inputs, request, chunk, idx.masked_fill(idx < 0, request.lc)
-                )
+                    idx = idx.masked_fill(idx < 0, request.lc)
+                write_prefill(inputs, request, chunk, idx)
 
 
 def _publish_prefill_blocks(

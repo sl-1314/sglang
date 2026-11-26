@@ -15,13 +15,16 @@ from sglang.kernels.ops.attention.dsa.litetopk_prefill import fp4_indexer_topk
 from sglang.kernels.ops.attention.dsv4.index_logits import (
     deep_gemm_fp4_paged_mqa_logits,
 )
+from sglang.kernels.ops.attention.dsv4.topk import topk_transform_ragged_v2
 from sglang.srt.layers.attention.dsv4.indexer import topk_transform_paged_from_metadata
 
 from .scoring import (
+    align_scores_for_topk,
     decode_scores,
     dense_prefill_topk,
     get_deep_gemm_decode_data,
     get_deep_gemm_prefill_data,
+    is_deterministic_mode,
     prefill_requests,
     select_decode,
     sharded_dense_prefill_topk,
@@ -150,9 +153,32 @@ class FullTopKIndexer:
             inputs=inputs,
             token_to_kv_pool=self.token_to_kv_pool,
         )
+        deterministic = is_deterministic_mode()
         for request, chunks in requests:
             for chunk in chunks:
-                idx = chunk.scores.topk(request.k, dim=-1, sorted=False).indices
+                if (
+                    deterministic
+                    and chunk.scores.is_cuda
+                    and torch.version.cuda is not None
+                ):
+                    scores_aligned = align_scores_for_topk(chunk.scores)
+                    lens32 = chunk.lens.to(torch.int32)
+                    zero_offsets = torch.zeros_like(lens32)
+                    idx = torch.empty(
+                        (chunk.scores.shape[0], request.k),
+                        dtype=torch.int32,
+                        device=chunk.scores.device,
+                    )
+                    topk_transform_ragged_v2(
+                        scores_aligned,
+                        lens32,
+                        out_offsets=zero_offsets,
+                        out_indices=idx,
+                        deterministic=True,
+                    )
+                    idx = idx.masked_fill(idx < 0, request.lc)
+                else:
+                    idx = chunk.scores.topk(request.k, dim=-1, sorted=False).indices
                 write_prefill(inputs, request, chunk, idx)
 
     def _deep_gemm_decode(self, inputs: DecodeInputs) -> None:

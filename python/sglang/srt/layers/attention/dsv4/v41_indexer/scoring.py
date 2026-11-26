@@ -26,6 +26,7 @@ from sglang.kernels.ops.attention.dsv4.index_logits import flat_index_logits_til
 from sglang.kernels.ops.attention.dsv4.topk import (
     plan_topk_v2,
     topk_transform_paged_v2,
+    topk_transform_ragged_v2,
 )
 from sglang.srt.environ import envs
 from sglang.srt.runtime_context import get_platform
@@ -387,6 +388,35 @@ def sharded_dense_prefill_topk(
 # ---------- torch ----------
 
 
+def is_deterministic_mode() -> bool:
+    from sglang.srt.batch_invariant_ops import is_batch_invariant_mode_enabled
+    from sglang.srt.runtime_context import get_exec
+
+    return (
+        is_batch_invariant_mode_enabled()
+        or get_exec().deterministic.enable_deterministic_inference
+    )
+
+
+def align_scores_for_topk(scores: torch.Tensor, align: int = 8) -> torch.Tensor:
+    """Ensure [rows, width] fp32 scores have 32-byte base alignment and stride % align == 0."""
+    width = scores.shape[1]
+    pad = -width % align
+    if (
+        pad == 0
+        and scores.is_contiguous()
+        and scores.data_ptr() % (align * scores.element_size()) == 0
+    ):
+        return scores
+    out = torch.empty(
+        (scores.shape[0], width + pad), dtype=scores.dtype, device=scores.device
+    )
+    out[:, :width].copy_(scores)
+    if pad:
+        out[:, width:].fill_(-torch.inf)
+    return out
+
+
 # Arbitrary cap on one bf16 [rows, heads, lc] score chunk; transients run ~3x this.
 _TORCH_SCORE_BUDGET_BYTES = 1 << 30
 
@@ -683,7 +713,26 @@ def select_decode(
             d.has_candidate_mask,
         )
     else:
-        write_decode(inputs, d, d.scores.topk(k, dim=-1, sorted=False).indices)
+        if (
+            is_deterministic_mode()
+            and d.scores.is_cuda
+            and torch.version.cuda is not None
+        ):
+            scores_aligned = align_scores_for_topk(d.scores)
+            lens32 = d.lens.to(torch.int32)
+            zero_offsets = torch.zeros_like(lens32)
+            idx = torch.empty((d.bs, k), dtype=torch.int32, device=d.scores.device)
+            topk_transform_ragged_v2(
+                scores_aligned,
+                lens32,
+                out_offsets=zero_offsets,
+                out_indices=idx,
+                deterministic=True,
+            )
+            idx = idx.masked_fill(idx < 0, d.lmax)
+        else:
+            idx = d.scores.topk(k, dim=-1, sorted=False).indices
+        write_decode(inputs, d, idx)
 
 
 def write_decode(inputs: DecodeInputs, d: DecodeScores, idx: torch.Tensor) -> None:
